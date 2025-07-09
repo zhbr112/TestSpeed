@@ -1,176 +1,135 @@
-﻿using System.Diagnostics;
-using System.Numerics;
+﻿using System.Numerics;
+using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Running;
+using ZLinq;
+using ZLinq.Simd;
 
-static unsafe int PFor(int[] arr)
+BenchmarkRunner.Run<Test>();
+
+[MemoryDiagnoser]
+public class Test
 {
-    int sum = 0;
-    for(int i = 0; i < arr.Length; i++)
-        sum += arr[i];
-    
-    return sum;
-}
+    private const int N = 200_000_000;
 
-static unsafe int PForeach(int[] arr)
-{
-    int sum = 0;
-    foreach(int i in arr)
-        sum += i;
-    
-    return sum;
-}
+    private int[] Arr;
 
-static unsafe int PLINQ(int[] arr)
-{
-    return arr.Sum();
-}
-
-static unsafe int PSIMD(int[] arr)
-{
-    int n = arr.Length;
-    int width = Vector<int>.Count;
-    var vSum = Vector<int>.Zero;
-
-    int i = 0;
-    for (; i <= n - width; i += width)
+    public Test()
     {
-        vSum += new Vector<int>(arr, i);
-    }
-
-    int sum = 0;
-    for(int j =0;j<width;j++)
-    {
-        sum += vSum[j];
-    }
-    for (; i < n; i++)
-    {
-        sum += arr[i];
-    }
-
-    return sum;
-}
-
-static unsafe int PSpanSIMD(Span<int> arr)
-{
-    int n = arr.Length;
-    int width = Vector<int>.Count;
-    var vSum = Vector<int>.Zero;
-
-    int i = 0;
-    for (; i <= n - width; i += width)
-    {
-        vSum += new Vector<int>(arr.Slice(i,width));
-    }
-
-    int sum = 0;
-    for (int j = 0; j < width; j++)
-    {
-        sum += vSum[j];
-    }
-    for (; i < n; i++)
-    {
-        sum += arr[i];
-    }
-
-    return sum;
-}
-
-static unsafe int PSIMD_mt(int[] arr)
-{
-    int processorCount = Environment.ProcessorCount;
-    int[] partialSums = new int[processorCount];
-    int chankSize = arr.Length / processorCount;
-
-    Parallel.For(0, processorCount, i =>
-    {
-        int start = i * chankSize;
-        int end = (i == processorCount - 1) ? arr.Length : start + chankSize;
-
-        var slice = new Span<int>(arr, start, end - start);
-
-        int sum = PSpanSIMD(slice);
-
-        partialSums[i] += sum;
-    });
-
-    return partialSums.Sum();
-}
-
-static unsafe int PSIMD_mt2(int[] arr)
-{
-    int processorCount = Environment.ProcessorCount;
-    int[] partialSums = new int[processorCount];
-    int chankSize = arr.Length / processorCount;
-    var theardList = new Thread[processorCount];
-    for (int i = 0; i < processorCount; i++)
-    {
-        theardList[i] = new Thread((object? j) =>
+        Arr = new int[N];
+        for (int i = 0; i < N; i++)
         {
-            int ii = (int)j!;
-            int start = ii * chankSize;
-            int end = (ii == processorCount - 1) ? arr.Length : start + chankSize;
+            Arr[i] = 1;
+        }
+    }
 
-            var slice = new Span<int>(arr, start, end - start);
+    [Benchmark]
+    public int PFor()
+    {
+        int sum = 0;
+        for (int i = 0; i < Arr.Length; i++)
+            sum += Arr[i];
+
+        return sum;
+    }
+
+    [Benchmark]
+    public int PForeach()
+    {
+        int sum = 0;
+        foreach (int i in Arr)
+            sum += i;
+
+        return sum;
+    }
+
+    [Benchmark]
+    public int PLINQ()
+    {
+        return Arr.Sum();
+    }
+
+    [Benchmark]
+    public int PZLINQ()
+    {
+        return Arr.AsValueEnumerable().Sum();
+    }
+
+    [Benchmark]
+    public int PZLINQUncheked()
+    {
+        return Arr.AsVectorizable().SumUnchecked();
+    }
+
+    [Benchmark]
+    public int PSIMD()
+    {
+        int n = Arr.Length;
+        int width = Vector<int>.Count;
+        var vSum = Vector<int>.Zero;
+
+        int i = 0;
+        for (; i <= n - width; i += width)
+        {
+            vSum += new Vector<int>(Arr, i);
+        }
+
+        int sum = 0;
+        for (int j = 0; j < width; j++)
+        {
+            sum += vSum[j];
+        }
+        for (; i < n; i++)
+        {
+            sum += Arr[i];
+        }
+
+        return sum;
+    }
+
+    public static int PSpanSIMD(Span<int> Arr)
+    {
+        int n = Arr.Length;
+        int width = Vector<int>.Count;
+        var vSum = Vector<int>.Zero;
+
+        int i = 0;
+        for (; i <= n - width; i += width)
+        {
+            vSum += new Vector<int>(Arr.Slice(i, width));
+        }
+
+        int sum = 0;
+        for (int j = 0; j < width; j++)
+        {
+            sum += vSum[j];
+        }
+        for (; i < n; i++)
+        {
+            sum += Arr[i];
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public int PSIMD_mt()
+    {
+        int processorCount = Environment.ProcessorCount;
+        int[] partialSums = new int[processorCount];
+        int chankSize = Arr.Length / processorCount;
+
+        Parallel.For(0, processorCount, i =>
+        {
+            int start = i * chankSize;
+            int end = (i == processorCount - 1) ? Arr.Length : start + chankSize;
+
+            var slice = new Span<int>(Arr, start, end - start);
 
             int sum = PSpanSIMD(slice);
 
-            partialSums[ii] += sum;
+            partialSums[i] += sum;
         });
 
-        theardList[i].Start(i);
+        return partialSums.Sum();
     }
-
-    foreach(Thread thread in theardList) thread.Join();
-
-    return partialSums.Sum();
-}
-
-static unsafe void Bench(int[] arr, int iter)
-{
-    var times = new List<List<double>>();
-    times.Add([]);
-    times.Add([]);
-    times.Add([]);
-
-    Stopwatch sw;
-    for(int i = 0;i < iter;i++)
-    {
-
-        sw = Stopwatch.StartNew();
-        PLINQ(arr);
-        sw.Stop();
-        times[0].Add(sw.ElapsedMilliseconds);
-
-        sw = Stopwatch.StartNew();
-        PSIMD(arr);
-        sw.Stop();
-        times[1].Add(sw.ElapsedMilliseconds);
-
-        sw = Stopwatch.StartNew();
-        PSIMD_mt(arr);
-        sw.Stop();
-        times[2].Add(sw.ElapsedMilliseconds);
-    }
-
-    foreach(var i in times)
-    {
-        var q=i.ToList();
-
-        q.Sort();
-        double mean = q.Average();
-        double median = q[q.Count / 2];
-
-        Console.WriteLine(mean);
-        Console.WriteLine(median);
-    }
-}
-unsafe
-{
-    const int N = 2_000_000_000;
-    var arr = new int[N];
-    for (int i = 0; i < N; i++)
-    {
-        arr[i] = 1;
-    }
-
-    Bench(arr, 50);
 }
