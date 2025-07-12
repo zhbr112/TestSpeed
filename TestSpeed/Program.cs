@@ -1,16 +1,16 @@
 ﻿using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading.Tasks;
+using System.Collections.Concurrent;
 using BenchmarkDotNet.Attributes;
-using BenchmarkDotNet.Disassemblers;
 using BenchmarkDotNet.Running;
 using ZLinq;
-using ZLinq.Simd;
+
 
 BenchmarkRunner.Run<Test>();
 
 [MemoryDiagnoser]
+[DisassemblyDiagnoser(maxDepth: 3)]
 public class Test
 {
     private const int N = 200_000_000;
@@ -24,6 +24,22 @@ public class Test
         {
             Arr[i] = 1;
         }
+    }
+
+    [Benchmark]
+    public int PartitionerChunk()
+    {
+        var q = Partitioner.Create(0 , Arr.Length);
+        int sum = 0;
+        Parallel.ForEach(q, () => 0, (range, _, localSum) =>
+        {
+            localSum += PSpanSIMD(new ReadOnlySpan<int>(Arr, range.Item1, range.Item2 - range.Item1));
+            return localSum;
+        }, localSum =>
+        {
+            Interlocked.Add(ref sum, localSum);
+        });
+        return sum;
     }
 
     [Benchmark]
@@ -72,7 +88,7 @@ public class Test
         return sum;
     }
 
-    public static int PSpanSIMD(Span<int> Arr)
+    public static int PSpanSIMD(ReadOnlySpan<int> Arr)
     {
         int n = Arr.Length;
         int width = Vector<int>.Count;
@@ -93,7 +109,6 @@ public class Test
         {
             sum += Arr[i];
         }
-
         return sum;
     }
 
@@ -108,6 +123,7 @@ public class Test
     {
         return Arr.AsValueEnumerable().Sum();
     }
+    
 
     [Benchmark]
     public int PZLINQ_Unchecked()
@@ -141,7 +157,7 @@ public class Test
         .AsValueEnumerable().Sum();
     }
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     public int PSIMD_mt_Parallel()
     {
         int processorCount = Environment.ProcessorCount;
@@ -186,14 +202,7 @@ public static class ArrayExtensions
     {
         return Task.WhenAll(sourceArray).Result;
     }
-    /// <summary>
-    /// Выполняет действие для каждого чанка массива, представленного как Span<int>.
-    /// Не выделяет память для самих чанков.
-    /// </summary>
-    /// <param name="sourceArray">Исходный массив.</param>
-    /// <param name="chunkSize">Размер чанка.</param>
-    /// <param name="chunkAction">Действие, которое нужно выполнить для каждого чанка.</param>
-        // Перегрузка для изменяемых чанков (Span<T> вместо ReadOnlySpan<T>)
+
     public static IEnumerable<TResult> ForEachChunkSpanParallel<TSourse, TResult>(this TSourse[] sourceArray, int chunkSize, Func<ReadOnlySpan<TSourse>, TResult> chunkAction)
     {
         int processorCount = Environment.ProcessorCount;
@@ -266,7 +275,7 @@ public static class ListMarshal
     // Класс-двойник для доступа к внутренним полям List<T>
     private sealed class ListInternals<T>
     {
-        public T[] _items;
+        public required T[] _items;
     }
 
     /// <summary>
@@ -291,5 +300,89 @@ public static class ListMarshal
 
         // Создаем Memory<T> из внутреннего массива, используя реальное количество элементов (Count).
         return new Memory<T>(internals._items, 0, list.Count);
+    }
+}
+
+public static class FastestArraySummer
+{
+    public static int Sum(int[] array)
+    {
+        if (array == null || array.Length == 0)
+        {
+            return 0;
+        }
+
+        // Для небольших массивов накладные расходы на распараллеливание не окупаются.
+        // Простой последовательный цикл работает быстрее. Порог подбирается эмпирически.
+        if (array.Length < 16384) // 16k элементов
+        {
+            int sum = 0;
+            foreach (int item in array)
+            {
+                sum += item;
+            }
+            return sum;
+        }
+
+        // Используем Partitioner для создания диапазонов для параллельной обработки.
+        // Это обеспечивает лучшую балансировку нагрузки, чем ручное разбиение на чанки.
+        var rangePartitioner = Partitioner.Create(0, array.Length);
+
+        long totalSum = 0;
+
+        // Обрабатываем диапазоны параллельно.
+        Parallel.ForEach(
+            rangePartitioner,
+            // Инициализируем локальную для потока сумму (0L - long). Это позволяет избежать блокировок в цикле.
+            () => 0L,
+            // Основное тело цикла, выполняемое каждым потоком для своего поддиапазона.
+            (range, loopState, localSum) =>
+            {
+                // Суммируем назначенный чанк с помощью оптимизированного SIMD-метода.
+                localSum += SumSimd(new ReadOnlySpan<int>(array, range.Item1, range.Item2 - range.Item1));
+                return localSum;
+            },
+            // Агрегируем конечный результат из локальной суммы каждого потока.
+            (localSum) => Interlocked.Add(ref totalSum, localSum)
+        );
+
+        // Сумма в предоставленном контексте помещается в int.
+        // Для метода общего назначения, возможно, стоит возвращать long или выбрасывать исключение при переполнении.
+        return (int)totalSum;
+    }
+
+    /// <summary>
+    /// Вычисляет сумму для среза (span) целых чисел с использованием SIMD (Single Instruction, Multiple Data).
+    /// </summary>
+    private static long SumSimd(ReadOnlySpan<int> span)
+    {
+        if (span.IsEmpty)
+        {
+            return 0;
+        }
+
+        long sum = 0;
+        var vSum = Vector<int>.Zero;
+        int width = Vector<int>.Count;
+        int end = span.Length - (span.Length % width);
+
+        // Обрабатываем срез int как срез векторов для эффективной обработки.
+        // Это позволяет избежать создания новых объектов Vector в цикле.
+        var vectors = MemoryMarshal.Cast<int, Vector<int>>(span.Slice(0, end));
+        foreach (var v in vectors)
+        {
+            vSum += v;
+        }
+
+        // Горизонтально суммируем элементы результирующего вектора.
+        sum += Vector.Sum(vSum);
+
+        // Суммируем оставшиеся элементы, которые не поместились в полный вектор.
+        for (int i = end; i < span.Length; i++)
+        {
+            sum += span[i];
+        }
+
+        return sum;
     }
 }
