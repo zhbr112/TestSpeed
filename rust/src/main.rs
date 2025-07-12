@@ -34,4 +34,20 @@ fn bench(arr:&'static [i32], iter:usize){
     println!("{:.3}",mean);
     println!("{:.3}",median);
     println!("{}",res);
+
+    let mut dur = Vec::with_capacity(iter);
+    let mut res =0;
+    for _ in 0..iter{
+        let start = Instant::now();
+        res = p(arr);
+        let elapsed = start.elapsed().as_secs_f32() * 1000.0;
+        dur.push(elapsed);
+    }
+    dur.sort_by(|a,b| a.partial_cmp(b).unwrap());
+    let mean: f32 = dur.iter().sum::<f32>() / dur.len() as f32;
+    let median = dur[dur.len()/2];
+
+    println!("{:.3}",mean);
+    println!("{:.3}",median);
+    println!("{}",res);
 }
